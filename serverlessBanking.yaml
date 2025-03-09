@@ -1,28 +1,125 @@
 
 AWSTemplateFormatVersion: "2010-09-09"
-
 Description: This is a Banking Application using S3, Lambda and API Gateway
 
+Parameters:
+    BucketNameParameter:
+        Type: String
+        Description: Eneter the name of S3 Bucket
+
+    LambdaRoleNameParameter:
+        Type: String
+        Description: Enter the name of Lambda IAM Role
+
+    SourceAccount:
+        Type: Number
+        Description: Enter Service Account Number
+
+
 Resources:
-  bankingS3Bucket:      # variable for the template
-    Type: 'AWS::S3::Bucket'
-    Properties:
-      BucketName: accountbalances
+    bankingS3Bucket:      # variable for the template
+        Type: 'AWS::S3::Bucket'
+        Properties:
+            BucketName: !Ref BucketNameParameter
 
 
-  LambdaExecutionRole:  
-    Type: AWS::IAM::Role
-    Properties:
-        AssumeRolePolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-                - Effect: Allow
-                  Principal:
-                    Service:
-                        - lambda.amazonaws.com  #Since lambda is goind to access S3
-                  Action:
-                    - 'sts:AssumeRole'  #To Temporarily access S3
-        Description: IAM Role for Lambda to Access S3
-        ManagedPolicyArns: 
-        - arn:aws:iam::aws:policy/AmazonS3FullAccess # from IAM Policies of S3FullAccess
-        RoleName: LambdaexecutionRole   # Role Name
+    LambdaExecutionRole:  
+        Type: AWS::IAM::Role
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    - Effect: Allow
+                      Principal:
+                        Service:
+                            - lambda.amazonaws.com  #Since lambda is goind to access S3
+                      Action:
+                        - 'sts:AssumeRole'  #To Temporarily access S3
+            Description: IAM Role for Lambda to Access S3
+            ManagedPolicyArns: 
+            - arn:aws:iam::aws:policy/AmazonS3FullAccess # from IAM Policies of S3FullAccess
+            RoleName: !Ref LambdaRoleNameParameter   # Role Name
+
+    LambdaFunction:
+        DependsOn: LambdaExecutionRole
+        Type: AWS::Lambda::Function
+        Properties:
+            Runtime: python3.11
+            Role: !GetAtt LambdaExecutionRole.Arn
+            Handler: index.lambda_handler  # lambda filename (index.py) + function name: index.py + lambda_handler
+            Code: 
+                ZipFile: |
+                    import json
+                    import boto3
+                    client = boto3.client('s3')
+                    def lambda_handler(event, context):
+                        response = client.get_object(
+                            Bucket= 'accountbalances',
+                            Key='accountsStatus.json'
+                        )
+                        data_byte= response['Body'].read()                   
+                        data_String = data_byte.decode('UTF-8')                 
+                        data_dict=json.loads(data_String)          
+                        return {
+                            'statusCode': 200,
+                            'body': json.dumps(data_dict),
+                            'headers': {
+                            'Content-Type': 'application/json'
+                            }
+                            }
+            Description: API Gateway Lambda S3
+            Timeout: 60
+
+    bankingRESTAPI:  #Creating REST API
+        Type: AWS::ApiGateway::RestApi
+        Properties:
+            Name: balancestatusapi  #API Gateway Name
+
+    bankingStatusResource:  # Creating Resource
+        Type: AWS::ApiGateway::Resource
+        Properties:
+            ParentId: !GetAtt bankingRESTAPI.RootResourceId  # Since the parent of this resource is / , we are referring to it. I cases where /resource1/resource2, while defining the parent id of resource2, it will be the (!Ref resource1)
+            PathPart: balanceStatus  # /balanceStatus
+            RestApiId: !Ref bankingRESTAPI #Id of API gateway
+
+
+
+    bankingStatusMethod:  #Creating Method for the resource
+        Type: 'AWS::ApiGateway::Method'
+        Properties:
+            RestApiId: !Ref bankingRESTAPI
+            ResourceId: !Ref bankingStatusResource
+            HttpMethod: GET
+            MethodResponses:
+                - StatusCode: 200
+            AuthorizationType: NONE
+            Integration:
+                Type: AWS
+                IntegrationResponses:
+                    - StatusCode: 200
+
+                IntegrationHttpMethod: POST #AWS recommends to use POST Integration Http Method for Lambda (AWS) Integration Type
+                Uri: !Sub 'arn:aws:apigateway:us-east-2:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations'
+
+
+
+    APIDeployment: # This is required to make the REST API Publicly accessible.
+        DependsOn: bankingStatusMethod # on Method, Deployment shoud not happen until the mthod is deployed.
+        Type: 'AWS::ApiGateway::Deployment'
+        Properties:
+            RestApiId: !Ref bankingRESTAPI
+            Description: Prod Deployment 
+            StageName: Prod
+         
+
+#Depends on can be used at other places too, for example on lambda function, lambda function depends on Lambda IAM Role. As a consequence, IAM Role for the lambda (LambdaExecutionRole) will be created first then lambda function.
+
+    LambdaInvokePermission:  #To enable Lambda function invokation upon API Gateway Request
+        Type: AWS::Lambda::Permission
+        Properties:
+            FunctionName: !Ref LambdaFunction
+            Action: lambda:InvokeFunction #On What function of Principal (API Gateway here) will Lambda function be invoked
+            Principal: 'apigateway.amazonaws.com' #API Gateway
+            SourceAccount: !Ref SourceAccount
+
+
